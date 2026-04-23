@@ -1,0 +1,263 @@
+#ESP32 TX (GPIO 17) → MAX3232 TTL RX
+#ESP32 RX (GPIO 16) → MAX3232 TTL TX
+#ESP32 3.3V/GND → MAX3232 VCC/GND
+
+substitutions:
+  name: vplfh57
+  friendly_name: vplfh57
+  use_address: <address on your LAN>
+
+
+  uartid: projector_bus
+  #ESP32 3.3V/GND → MAX3232 VCC/GND
+  txpin: 19 # → MAX3232 TTL TX
+  rxpin: 18 # → MAX3232 TTL RX
+  baudrate: 38400
+  stopbit: 1
+  parity: EVEN
+
+globals:
+  - id: is_projector_on
+    type: bool
+    restore_value: no
+    #initial_value: 'false' # No initial value means it waits for the first real poll
+
+esphome:
+  name: ${name}
+  name_add_mac_suffix: true
+  friendly_name: ${friendly_name}
+  min_version: 2025.5.0
+  on_boot:
+    priority: -10 # Wait for UART and Network to be ready
+    then:
+      - script.execute: startup_sync
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+bluetooth_proxy:
+
+wifi:
+  ssid: !secret wifi_secure
+  password: !secret wifipass_secure
+  use_address: ${use_address}
+  
+logger:
+  level: DEBUG
+  logs:
+    sensor: WARN
+
+api:
+  encryption:
+    key: !secret api_key  
+  id: api_id
+# Helper to provide raw command access via Home Assistant services
+  services:
+    - service: send_raw_command
+      variables:
+        cmd: string
+      then:
+        - uart.write: !lambda |-
+            std::string s = cmd + "\n";
+            return std::vector<unsigned char>(s.begin(), s.end());
+
+ota:
+  - platform: esphome
+    id: ota_esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+
+# Configure the RS232 Serial Port
+# ADCP typically uses 38400 or 115200 bps; check your projector menu settings.
+uart:
+  id: ${uartid}
+  tx_pin: ${txpin}
+  rx_pin: ${rxpin}
+  baud_rate: ${baudrate}
+  stop_bits: ${stopbit}
+  parity: ${parity}
+
+switch:
+  - platform: template
+    name: "Projector Power"
+    id: projector_power
+    # No optimistic: true here ensures it doesn't move on its own at boot
+    lambda: |-
+      return id(is_projector_on);
+    turn_on_action:
+      - uart.write: "power \"on\"\r\n"
+      - lambda: 'id(is_projector_on) = true;'
+    turn_off_action:
+      - uart.write: "power \"off\"\r\n"
+      - lambda: 'id(is_projector_on) = false;'
+
+  # Video Muting (Blanking) 
+  - platform: template
+    name: "Projector Blank"
+    optimistic: true
+    turn_on_action:
+      - uart.write: "blank \"on\"\n"
+    turn_off_action:
+      - uart.write: "blank \"off\"\n"
+
+select:
+  # Input Selection [cite: 375, 376]
+  - platform: template
+    name: "Projector Input"
+    id: input_selector
+    optimistic: true
+    options:
+      - "HDMI (Input C)"
+      - "HDBaseT (Input D)"
+      - "RGB (Input A)"
+      - "DVI (Input B)"
+      - "Video"
+    set_action:
+      - lambda: |-
+          if (x == "HDMI (Input C)") {
+            id(projector_bus).write_str("input \"hdmi1\"\n");
+          } else if (x == "HDBaseT (Input D)") {
+            id(projector_bus).write_str("input \"hdbaset1\"\n");
+          } else if (x == "RGB (Input A)") {
+            id(projector_bus).write_str("input \"rgb1\"\n");
+          } else if (x == "DVI (Input B)") {
+            id(projector_bus).write_str("input \"dvi1\"\n");
+          } else if (x == "Video") {
+            id(projector_bus).write_str("input \"video1\"\n");
+          }
+
+  - platform: template
+    name: "Projector Test Pattern"
+    id: test_pattern_selector
+    optimistic: true
+    options:
+      - "Off"
+      - "Crosshatch"
+      - "Color Bars"
+      - "White"
+      - "Black"
+    set_action:
+      - lambda: |-
+          if (x == "Off") {
+            id(projector_bus).write_str("pattern_sel \"off\"\n");
+          } else if (x == "Crosshatch") {
+            id(projector_bus).write_str("pattern_sel \"crosshatch\"\n");
+          } else if (x == "Color Bars") {
+            id(projector_bus).write_str("pattern_sel \"color_bars1\"\n");
+          } else if (x == "White") {
+            id(projector_bus).write_str("pattern_sel \"white\"\n");
+          } else if (x == "Black") {
+            id(projector_bus).write_str("pattern_sel \"black\"\n");
+          }
+
+script:
+  - id: startup_sync
+    then:
+      - logger.log: "Starting Safe-Boot state check..."
+      - uart.write: "power_status ?\r\n"
+      - delay: 1000ms
+      - script.execute: read_projector_status
+      # Logic for 'neither on nor off' (Warming/Cooling/Startup)
+      - lambda: |-
+          auto s = id(projector_status).state;
+          if (s != "On" && s != "Standby") {
+            ESP_LOGW("startup", "Projector in transitional state. Waiting 15s...");
+          }
+      - delay: 15s
+      - uart.write: "power_status ?\r\n"
+      - delay: 1000ms
+      - script.execute: read_projector_status
+
+  - id: read_projector_status
+    mode: restart
+    then:
+      - delay: 500ms 
+      - lambda: |-
+          uint8_t data[64]; 
+          if (id(projector_bus).available()) {
+            size_t length = id(projector_bus).available();
+            if (length > 63) length = 63;
+            id(projector_bus).read_array(data, length);
+            std::string res((char*)data, length);
+
+            // Update Global for Switch logic
+            if (res.find("on") != std::string::npos) {
+              id(is_projector_on) = true;
+              id(projector_status).publish_state("On");
+            } else if (res.find("standby") != std::string::npos) {
+              id(is_projector_on) = false;
+              id(projector_status).publish_state("Standby");
+            } else if (res.find("warming") != std::string::npos || res.find("startup") != std::string::npos) {
+              id(projector_status).publish_state("Warming Up");
+            } else if (res.find("cooling") != std::string::npos) {
+              id(projector_status).publish_state("Cooling Down");
+            }
+          }
+
+
+binary_sensor:
+  - platform: template
+    id: projector_power_state
+    internal: true
+    
+text_sensor:
+  - platform: template
+    name: "Projector Status"
+    id: projector_status
+    update_interval: 10s
+    lambda: |-
+      id(projector_bus).write_str("power_status ?\r\n"); 
+      id(read_projector_status).execute();
+      return {};
+
+button:
+  - platform: template
+    name: "Menu Key"
+    on_press:
+      - uart.write: "key \"menu\"\n"
+  
+  - platform: template
+    name: "Enter Key"
+    on_press:
+      - uart.write: "key \"enter\"\n"
+
+  - platform: template
+    name: "Menu Up"
+    icon: "mdi:arrow-up-bold"
+    on_press:
+      - uart.write: "key \"up\"\r\n"
+
+  - platform: template
+    name: "Menu Down"
+    icon: "mdi:arrow-down-bold"
+    on_press:
+      - uart.write: "key \"down\"\r\n"
+
+  - platform: template
+    name: "Menu Left"
+    icon: "mdi:arrow-left-bold"
+    on_press:
+      - uart.write: "key \"left\"\r\n"
+
+  - platform: template
+    name: "Menu Right"
+    icon: "mdi:arrow-right-bold"
+    on_press:
+      - uart.write: "key \"right\"\r\n"
+
+  - platform: template
+    name: "Menu Return"
+    icon: "mdi:keyboard-return"
+    on_press:
+      - uart.write: "key \"return\"\r\n"
+
+  # Reset (Handy for misconfigured image settings) [cite: 21]
+  #- platform: template
+  #  name: "Projector Reset"
+  #  icon: "mdi:refresh"
+  #  on_press:
+  #    - uart.write: "key \"reset\"\r\n"
