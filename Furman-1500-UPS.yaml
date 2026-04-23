@@ -1,0 +1,776 @@
+# ESPdevice: ESP-WROOM-32 ESP-32S 
+# TTL to RS232: MAX3232
+
+substitutions:
+  name: furman1500ups
+  friendly_name: "Furman F1500-UPS"
+  use_address: <ip on your LAN>
+  uartid: ups_bus
+  txpin: "17"
+  rxpin: "16"
+  baudrate: "9600"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: 600
+    then:
+      - lambda: |-
+          id(boot_complete) = false;
+          id(bank1_known) = false;
+          id(bank2_known) = false;
+          id(bank3_known) = false;
+          id(bank4_known) = false;
+          id(fast_poll_count) = 0;
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret api_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_secure
+  password: !secret wifipass_secure
+  use_address: ${use_address}
+
+web_server:
+  port: 80
+
+uart:
+  id: ${uartid}
+  tx_pin: ${txpin}
+  rx_pin: ${rxpin}
+  baud_rate: ${baudrate}
+  data_bits: 8
+  stop_bits: 1
+  parity: NONE
+
+globals:
+  - id: uart_buf
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  - id: boot_complete
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: bank1_known
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: bank2_known
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: bank3_known
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: bank4_known
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: poll_slot
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: boot_ticks
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: fast_poll_count
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# ──────────────────────────────────────────────
+#  Numeric sensors
+# ──────────────────────────────────────────────
+sensor:
+  - platform: template
+    id: battery_pct
+    name: "Battery Charge"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    device_class: battery
+    state_class: measurement
+    icon: "mdi:battery"
+    update_interval: never
+
+  - platform: template
+    id: load_pct
+    name: "Load Level"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    state_class: measurement
+    icon: "mdi:gauge"
+    update_interval: never
+
+  - platform: template
+    id: watts_sensor
+    name: "Output Power"
+    unit_of_measurement: "W"
+    accuracy_decimals: 0
+    device_class: power
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: volts_in
+    name: "Input Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 0
+    device_class: voltage
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: volts_out
+    name: "Output Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 0
+    device_class: voltage
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: current_amps
+    name: "Output Current"
+    unit_of_measurement: "A"
+    accuracy_decimals: 1
+    device_class: current
+    state_class: measurement
+    update_interval: never
+
+  - platform: template
+    id: backup_time
+    name: "Estimated Backup Time"
+    unit_of_measurement: "min"
+    accuracy_decimals: 0
+    icon: "mdi:timer-outline"
+    state_class: measurement
+    update_interval: never
+
+# ──────────────────────────────────────────────
+#  Text sensors
+# ──────────────────────────────────────────────
+text_sensor:
+  - platform: template
+    id: power_status
+    name: "UPS Power Status"
+    icon: "mdi:lightning-bolt"
+    update_interval: never
+
+  - platform: template
+    id: batt_state
+    name: "Battery State"
+    icon: "mdi:battery-charging"
+    update_interval: never
+
+  - platform: template
+    id: avr_state
+    name: "AVR Stage"
+    icon: "mdi:sine-wave"
+    update_interval: never
+
+# ──────────────────────────────────────────────
+#  Binary sensors
+# ──────────────────────────────────────────────
+binary_sensor:
+  - platform: template
+    id: power_fault
+    name: "Power Fault"
+    device_class: problem
+    lambda: 'return {};'
+
+  - platform: template
+    id: low_battery
+    name: "Low Battery"
+    device_class: battery
+    lambda: 'return {};'
+
+# ──────────────────────────────────────────────
+#  Switches
+# ──────────────────────────────────────────────
+switch:
+  - platform: template
+    id: bank1_switch
+    name: "Bank 1 (Critical)"
+    icon: "mdi:power-socket"
+    optimistic: false
+    restore_mode: DISABLED
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank1_known);'
+          then:
+            - logger.log: "CMD: SWITCH 1 ON"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 1 ON\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank1_known);'
+          then:
+            - logger.log: "CMD: SWITCH 1 OFF"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 1 OFF\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    id: bank2_switch
+    name: "Bank 2 (Critical)"
+    icon: "mdi:power-socket"
+    optimistic: false
+    restore_mode: DISABLED
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank2_known);'
+          then:
+            - logger.log: "CMD: SWITCH 2 ON"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 2 ON\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank2_known);'
+          then:
+            - logger.log: "CMD: SWITCH 2 OFF"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 2 OFF\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    id: bank3_switch
+    name: "Bank 3 (Non-Critical)"
+    icon: "mdi:power-socket-outline"
+    optimistic: false
+    restore_mode: DISABLED
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank3_known);'
+          then:
+            - logger.log: "CMD: SWITCH 3 ON"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 3 ON\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank3_known);'
+          then:
+            - logger.log: "CMD: SWITCH 3 OFF"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 3 OFF\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    id: bank4_switch
+    name: "Bank 4 (Non-Critical)"
+    icon: "mdi:power-socket-outline"
+    optimistic: false
+    restore_mode: DISABLED
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank4_known);'
+          then:
+            - logger.log: "CMD: SWITCH 4 ON"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 4 ON\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete) && id(bank4_known);'
+          then:
+            - logger.log: "CMD: SWITCH 4 OFF"
+            - uart.write:
+                id: ${uartid}
+                data: "!SWITCH 4 OFF\r"
+            - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    id: buzzer_switch
+    name: "UPS Buzzer"
+    icon: "mdi:bell-outline"
+    optimistic: true
+    restore_mode: DISABLED
+    turn_on_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - uart.write:
+                id: ${uartid}
+                data: "!SET_BUZZER ON\r"
+    turn_off_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - uart.write:
+                id: ${uartid}
+                data: "!SET_BUZZER OFF\r"
+
+# ──────────────────────────────────────────────
+#  Select — populated by ?LIST_CONFIG
+#  set_action uses lambda + write_str to avoid
+#  std::string vs vector<uint8_t> type error
+# ──────────────────────────────────────────────
+select:
+  - platform: template
+    id: avr_mode_select
+    name: "AVR Mode"
+    icon: "mdi:sine-wave"
+    optimistic: true
+    restore_value: false
+    options:
+      - "OFF"
+      - "STANDARD"
+      - "SENSITIVE"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                std::string cmd = "!SET_AVR " + x + "\r";
+                id(${uartid}).write_str(cmd.c_str());
+
+  - platform: template
+    id: scroll_mode_select
+    name: "LCD Scroll Mode"
+    icon: "mdi:monitor"
+    optimistic: true
+    restore_value: false
+    options:
+      - "OFF"
+      - "5SEC"
+      - "10SEC"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                std::string cmd = "!SET_SCROLLMODE " + x + "\r";
+                id(${uartid}).write_str(cmd.c_str());
+
+  - platform: template
+    id: sleep_mode_select
+    name: "LCD Sleep Mode"
+    icon: "mdi:monitor-off"
+    optimistic: true
+    restore_value: false
+    options:
+      - "OFF"
+      - "30SEC"
+      - "60SEC"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                std::string cmd = "!SET_SLEEPMODE " + x + "\r";
+                id(${uartid}).write_str(cmd.c_str());
+
+  - platform: template
+    id: normal_voltage_select
+    name: "Nominal Line Voltage"
+    icon: "mdi:lightning-bolt"
+    optimistic: true
+    restore_value: false
+    options:
+      - "220"
+      - "230"
+      - "240"
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                std::string cmd = "!SET_NORMALVOLT " + x + "\r";
+                id(${uartid}).write_str(cmd.c_str());
+
+# ──────────────────────────────────────────────
+#  Numbers — populated by ?LIST_CONFIG
+#  set_action uses lambda + write_str
+# ──────────────────────────────────────────────
+number:
+  - platform: template
+    id: bank3_threshold
+    name: "Bank 3 Shutoff Threshold"
+    icon: "mdi:battery-alert"
+    optimistic: true
+    restore_value: false
+    min_value: 20
+    max_value: 90
+    step: 10
+    unit_of_measurement: "%"
+    mode: slider
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                char buf[32];
+                snprintf(buf, sizeof(buf), "!SET_BATTHRESH 3 %d\r", (int)x);
+                id(${uartid}).write_str(buf);
+
+  - platform: template
+    id: bank4_threshold
+    name: "Bank 4 Shutoff Threshold"
+    icon: "mdi:battery-alert"
+    optimistic: true
+    restore_value: false
+    min_value: 20
+    max_value: 90
+    step: 10
+    unit_of_measurement: "%"
+    mode: slider
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                char buf[32];
+                snprintf(buf, sizeof(buf), "!SET_BATTHRESH 4 %d\r", (int)x);
+                id(${uartid}).write_str(buf);
+
+  - platform: template
+    id: lcd_brightness
+    name: "LCD Brightness"
+    icon: "mdi:brightness-6"
+    optimistic: true
+    restore_value: false
+    min_value: 25
+    max_value: 100
+    step: 25
+    unit_of_measurement: "%"
+    mode: slider
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                char buf[32];
+                snprintf(buf, sizeof(buf), "!SET_BRIGHT %03d\r", (int)x);
+                id(${uartid}).write_str(buf);
+
+  - platform: template
+    id: ir_output_delay
+    name: "IR Output Delay"
+    icon: "mdi:timer-outline"
+    optimistic: true
+    restore_value: false
+    min_value: 0
+    max_value: 60
+    step: 5
+    unit_of_measurement: "s"
+    mode: slider
+    set_action:
+      - if:
+          condition:
+            lambda: 'return id(boot_complete);'
+          then:
+            - lambda: |-
+                char buf[32];
+                snprintf(buf, sizeof(buf), "!SET_IRDELAY %d\r", (int)x);
+                id(${uartid}).write_str(buf);
+
+# ──────────────────────────────────────────────
+#  Buttons
+# ──────────────────────────────────────────────
+button:
+  - platform: template
+    name: "All Outlets ON"
+    icon: "mdi:power-plug"
+    on_press:
+      - uart.write:
+          id: ${uartid}
+          data: "!ALL_ON\r"
+      - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    name: "All Outlets OFF"
+    icon: "mdi:power-plug-off"
+    on_press:
+      - uart.write:
+          id: ${uartid}
+          data: "!ALL_OFF\r"
+      - lambda: 'id(fast_poll_count) = 5;'
+
+  - platform: template
+    name: "Run UPS Self-Test"
+    icon: "mdi:checkbox-marked-circle-outline"
+    on_press:
+      - uart.write:
+          id: ${uartid}
+          data: "!UPS_TEST ON\r"
+
+  - platform: template
+    name: "Poll All Status"
+    icon: "mdi:refresh"
+    on_press:
+      - lambda: |-
+          id(poll_slot) = 0;
+          id(fast_poll_count) = 5;
+
+  - platform: template
+    name: "Query Config"
+    icon: "mdi:cog-outline"
+    on_press:
+      - uart.write:
+          id: ${uartid}
+          data: "?LIST_CONFIG\r"
+
+  - platform: template
+    name: "Factory Reset UPS Settings"
+    icon: "mdi:restore"
+    on_press:
+      - uart.write:
+          id: ${uartid}
+          data: "!RESET_ALL\r"
+
+# ──────────────────────────────────────────────
+#  Intervals
+# ──────────────────────────────────────────────
+interval:
+  # Normal poll: one query per slot every 10s
+  # Slot 0: OUTLETSTAT  1: POWERSTAT   2: BATTERYSTAT
+  # Slot 3: LOADSTAT    4: POWER       5: LIST_CONFIG
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(boot_complete)) {
+            id(boot_ticks) += 1;
+            if (id(boot_ticks) < 3) return;
+            if (id(bank1_known) && id(bank2_known) &&
+                id(bank3_known) && id(bank4_known)) {
+              id(boot_complete) = true;
+              ESP_LOGI("ups", "Boot complete - controls unlocked");
+            }
+          }
+
+          const char* queries[] = {
+            "?OUTLETSTAT\r",
+            "?POWERSTAT\r",
+            "?BATTERYSTAT\r",
+            "?LOADSTAT\r",
+            "?POWER\r",
+            "?LIST_CONFIG\r"
+          };
+          int slot = id(poll_slot) % 6;
+          ESP_LOGD("ups", "Poll slot %d: %s", slot, queries[slot]);
+          id(${uartid}).write_str(queries[slot]);
+          id(poll_slot) = slot + 1;
+
+  # Fast poll after switch commands
+  - interval: 2s
+    then:
+      - lambda: |-
+          if (id(fast_poll_count) > 0) {
+            ESP_LOGD("ups", "Fast poll remaining: %d", id(fast_poll_count));
+            id(${uartid}).write_str("?OUTLETSTAT\r");
+            id(fast_poll_count) -= 1;
+          }
+
+  # UART reader
+  - interval: 500ms
+    then:
+      - lambda: |-
+          auto strip_spaces = [](std::string s) -> std::string {
+            s.erase(std::remove(s.begin(), s.end(), ' '), s.end());
+            return s;
+          };
+
+          auto safe_parse = [](const std::string &s, float &out) -> bool {
+            if (s.empty()) return false;
+            char *end = nullptr;
+            out = strtof(s.c_str(), &end);
+            return end != s.c_str();
+          };
+
+          auto after_eq = [](const std::string &s) -> std::string {
+            auto pos = s.find('=');
+            if (pos == std::string::npos) return "";
+            return s.substr(pos + 1);
+          };
+
+          auto strip_tail = [](std::string s) -> std::string {
+            while (!s.empty() &&
+                   !isalnum((unsigned char)s.back()) && s.back() != '.')
+              s.pop_back();
+            return s;
+          };
+
+          while (id(${uartid}).available()) {
+            uint8_t c;
+            id(${uartid}).read_byte(&c);
+
+            if (c == '\r' || c == '\n') {
+              if (!id(uart_buf).empty()) {
+                std::string line = id(uart_buf);
+                id(uart_buf) = "";
+
+                while (!line.empty() &&
+                       (line[0]=='$' || line[0]=='>' ||
+                        line[0]=='#' || line[0]==' '))
+                  line = line.substr(1);
+
+                if (line.empty()) continue;
+                if (line[0] == '-') continue;
+
+                ESP_LOGD("ups", "RX: [%s]", line.c_str());
+
+                std::string n = strip_spaces(line);
+                float val = 0.0f;
+                std::string rhs = strip_tail(after_eq(n));
+
+                // ── Outlet bank states ──────────────────
+                if (n.rfind("BANK1=", 0) == 0) {
+                  bool on = (rhs == "ON");
+                  id(bank1_known) = true;
+                  id(bank1_switch).publish_state(on);
+                } else if (n.rfind("BANK2=", 0) == 0) {
+                  bool on = (rhs == "ON");
+                  id(bank2_known) = true;
+                  id(bank2_switch).publish_state(on);
+                } else if (n.rfind("BANK3=", 0) == 0) {
+                  bool on = (rhs == "ON");
+                  id(bank3_known) = true;
+                  id(bank3_switch).publish_state(on);
+                } else if (n.rfind("BANK4=", 0) == 0) {
+                  bool on = (rhs == "ON");
+                  id(bank4_known) = true;
+                  id(bank4_switch).publish_state(on);
+                }
+
+                // ── Battery charge % ────────────────────
+                else if (n.rfind("BATTERY=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(battery_pct).publish_state(val);
+                }
+
+                // ── Load % ──────────────────────────────
+                else if (n.rfind("LOAD=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(load_pct).publish_state(val);
+                }
+
+                // ── Watts ───────────────────────────────
+                else if (n.rfind("WATTS=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(watts_sensor).publish_state(val);
+                }
+
+                // ── Input voltage ───────────────────────
+                else if (n.rfind("VOLTS_IN=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(volts_in).publish_state(val);
+                }
+
+                // ── Output voltage ──────────────────────
+                else if (n.rfind("VOLTS_OUT=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(volts_out).publish_state(val);
+                }
+
+                // ── Current ─────────────────────────────
+                else if (n.rfind("CURRENT=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(current_amps).publish_state(val);
+                }
+
+                // ── Power status ────────────────────────
+                else if (n.rfind("PWR=", 0) == 0) {
+                  id(power_status).publish_state(rhs);
+                  id(power_fault).publish_state(rhs != "NORMAL");
+                }
+
+                // ── Battery state ───────────────────────
+                else if (n.rfind("BATTSTATE=", 0) == 0) {
+                  id(batt_state).publish_state(rhs);
+                }
+
+                // ── Low battery ─────────────────────────
+                else if (n == "LOWBAT") {
+                  id(low_battery).publish_state(true);
+                }
+
+                // ── Backup time ─────────────────────────
+                else if (n.rfind("TIME=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(backup_time).publish_state(val);
+                  id(low_battery).publish_state(false);
+                }
+
+                // ── AVR stage (unsolicited) ──────────────
+                else if (n.rfind("AVRSTATE=", 0) == 0) {
+                  id(avr_state).publish_state(rhs);
+                }
+
+                // ── LIST_CONFIG responses ────────────────
+                else if (n.rfind("AVR=", 0) == 0) {
+                  id(avr_mode_select).publish_state(rhs);
+                }
+                else if (n.rfind("BRIGHTNESS=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(lcd_brightness).publish_state(val);
+                }
+                else if (n.rfind("SCROLL_MODE=", 0) == 0) {
+                  id(scroll_mode_select).publish_state(rhs);
+                }
+                else if (n.rfind("SLEEP_MODE=", 0) == 0) {
+                  id(sleep_mode_select).publish_state(rhs);
+                }
+                else if (n.rfind("NORMALVOLT=", 0) == 0) {
+                  id(normal_voltage_select).publish_state(rhs);
+                }
+                else if (n.rfind("BUZZER=", 0) == 0) {
+                  id(buzzer_switch).publish_state(rhs == "ON");
+                }
+                else if (n.rfind("BTHRESH3=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(bank3_threshold).publish_state(val);
+                }
+                else if (n.rfind("BTHRESH4=", 0) == 0) {
+                  if (safe_parse(rhs, val)) id(bank4_threshold).publish_state(val);
+                }
+                else if (n.rfind("BTHRESH=", 0) == 0) {
+                  if (safe_parse(rhs, val)) {
+                    id(bank3_threshold).publish_state(val);
+                    id(bank4_threshold).publish_state(val);
+                  }
+                }
+
+                // ── Unmatched ───────────────────────────
+                else {
+                  ESP_LOGW("ups", "UNMATCHED: [%s]", n.c_str());
+                }
+              }
+            } else {
+              id(uart_buf) += (char)c;
+              if (id(uart_buf).size() > 64) id(uart_buf) = "";
+            }
+          }
